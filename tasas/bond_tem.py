@@ -258,8 +258,9 @@ def fetch_tamar_latest_decimal(id_variable: int) -> Optional[float]:
 
 
 def tamar_to_tem_monthly(tamar_as_decimal: float) -> float:
+    # Fórmula oficial del BCRA: TAMAR_TEM = [(1+TAMAR/((365/32)))^((365/32))]^((1/12))-1
     base = 365.0 / 32.0
-    effective_annual = (1.0 + (tamar_as_decimal / base)) ** base
+    effective_annual = (1.0 + tamar_as_decimal / base) ** base
     return effective_annual ** (1.0 / 12.0) - 1.0
 
 
@@ -354,6 +355,13 @@ def compute_market_tem(
         results["tem_from_tamar_latest"] = tamar_to_tem_monthly(tamar_latest_decimal)
         preferred = results["tem_from_tamar_latest"]
     results["tem_market"] = preferred
+    if preferred is not None:
+        percent = round(preferred * 100.0, 2)
+        results["tem_market_percentage"] = percent
+        results["tem_market_percentage_str"] = f"{percent:.2f}%"
+    else:
+        results["tem_market_percentage"] = None
+        results["tem_market_percentage_str"] = None
     return results
 
 
@@ -455,7 +463,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--maturity", default=None, help="Fecha de vencimiento (YYYY-MM-DD), override manual")
     parser.add_argument("--fixed-tem", type=float, default=None, help="TEM fija mensual (duales)")
     parser.add_argument("--no-holidays", action="store_true", help="Ignorar feriados en ventana de -10dh (duales)")
-    parser.add_argument("--tamar-id", type=int, default=None, help="ID variable TAMAR en BCRA (opcional)")
+    parser.add_argument("--tamar-id", type=int, default=44, help="ID variable TAMAR en BCRA (opcional)")
     parser.add_argument("--tamar-avg", type=float, default=None, help="Promedio TAMAR decimal override (opcional)")
     parser.add_argument("--settlement", default=None, help="Fecha de liquidación para mercado (YYYY-MM-DD). Default: hoy")
     parser.add_argument("--face", type=float, default=None, help="VNO base para precio (default según snapshot o 100)")
@@ -464,7 +472,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--market-source",
         choices=["ytm", "price", "tamar", "auto"],
-        default="auto",
+        default="tamar",
         help="Fuente para TEM de mercado: ytm (TIREA), price (bullet), tamar (última TAMAR), auto (prioridad ytm>price>tamar)",
     )
 
@@ -533,6 +541,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             else:
                 # auto already chosen inside compute_market_tem
                 pass
+
+            # Recompute percentage fields to match the selected source
+            tm = market.get("tem_market")
+            if tm is not None:
+                percent = round(tm * 100.0, 2)
+                market["tem_market_percentage"] = percent
+                market["tem_market_percentage_str"] = f"{percent:.2f}%"
+            else:
+                market["tem_market_percentage"] = None
+                market["tem_market_percentage_str"] = None
         else:
             market = {"error": "No se pudo determinar la fecha de vencimiento"}
     except Exception as exc:

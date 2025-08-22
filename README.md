@@ -1,4 +1,6 @@
-Bond TEM Calculator
+# Bond TEM Calculator
+
+Este nace como respuesta al este tweet: https://x.com/JohnGalt_is_www/status/1958870754872734161
 
 CLI para calcular la TEM de prospecto (duales conocidos) y de mercado para bonos por ticker.
 
@@ -21,7 +23,6 @@ Notas
 - Para duales conocidos (`TTM26`, `TTJ26`, `TTS26`, `TTD26`) se usa fallback de vencimiento y TIREA desde la publicación oficial (Presidencia/Argentina.gob.ar): `https://www.argentina.gob.ar/noticias/llamado-licitacion-para-la-conversion-de-titulos-elegibles-por-una-canasta-de-0`.
 
 
-
-BEFORE:
-
-python ttm26_tem.py --tamar-avg 0.50 --tirea 0.3055 --price  114.20 --settlement 2025-01-29 | cat
+Fuentes:
+- APIS BCRA con datos historicos de TAMAR: https://bcra.gob.ar/BCRAyVos/catalogo-de-APIs-banco-central.asp
+- API Milton Casco para precios bonos: https://data912.com
