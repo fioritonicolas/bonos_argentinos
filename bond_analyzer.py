@@ -14,7 +14,6 @@ try:
 except Exception:
     pass
 try:
-    # Prefer system certificates where available (python-truststore)
     import truststore as _truststore  # type: ignore
     _truststore.inject_into_ssl()
 except Exception:
@@ -32,10 +31,10 @@ DATA912_ENDPOINTS = [
     ("arg_notes", "https://data912.com/live/arg_notes"),
 ]
 
-
 # Known Duals fixed monthly TEM (prospectus), canonical maturity and reference TIREA
 # Source (Presidencia/Argentina.gob.ar):
 # https://www.argentina.gob.ar/noticias/llamado-licitacion-para-la-conversion-de-titulos-elegibles-por-una-canasta-de-0
+
 DUAL_BONDS_MAP: Dict[str, Dict[str, Any]] = {
     "TTM26": {
         "fixed_monthly_tem": 0.0225,
@@ -130,7 +129,6 @@ def http_get_json(url: str, headers: Optional[Dict[str, str]] = None, params: Op
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.SSLError:
-        # Controlled fallback if TLS chain cannot be verified in this environment
         try:
             resp = requests.get(url, headers=headers or {}, params=params or {}, timeout=30, verify=False)
             resp.raise_for_status()
@@ -258,10 +256,37 @@ def fetch_tamar_latest_decimal(id_variable: int) -> Optional[float]:
 
 
 def tamar_to_tem_monthly(tamar_as_decimal: float) -> float:
-    # Fórmula oficial del BCRA: TAMAR_TEM = [(1+TAMAR/((365/32)))^((365/32))]^((1/12))-1
     base = 365.0 / 32.0
     effective_annual = (1.0 + tamar_as_decimal / base) ** base
     return effective_annual ** (1.0 / 12.0) - 1.0
+
+
+def tamar_to_market_tem(tamar_decimal: float, settlement_date: dt.date, maturity_date: dt.date) -> float:
+    """
+    Calcula TEM de mercado basado en TAMAR considerando el plazo hasta vencimiento.
+    Para bonos duales, aplica TAMAR desde settlement hasta maturity.
+    """
+    # Calcular tiempo hasta vencimiento en años (base 30E/360)
+    time_to_maturity = year_fraction_30e_360(settlement_date, maturity_date)
+    
+    if time_to_maturity <= 0:
+        return 0.0
+    
+    # TAMAR se aplica desde hoy hasta vencimiento
+    # Fórmula similar al prospecto: VPV = VNO * (1 + TAMAR_TEM)^(días/360 * 12)
+    tamar_tem_monthly = tamar_to_tem_monthly(tamar_decimal)
+    
+    # Calcular rendimiento total hasta vencimiento
+    total_return = (1.0 + tamar_tem_monthly) ** (time_to_maturity * 12.0) - 1.0
+    
+    # Convertir a TEM mensual equivalente
+    months_to_maturity = time_to_maturity * 12.0
+    if months_to_maturity <= 0:
+        return 0.0
+        
+    tem_market = ((1.0 + total_return) ** (1.0 / months_to_maturity)) - 1.0
+    
+    return tem_market
 
 
 def compute_dual_prospectus_tem(
@@ -272,7 +297,6 @@ def compute_dual_prospectus_tem(
 ) -> Dict[str, Any]:
     start_window = shift_business_days(params.issue_date, -10, use_holidays=use_holidays)
     end_window = shift_business_days(params.maturity_date, -10, use_holidays=use_holidays)
-    # Clamp to not exceed today in the API query range
     today = dt.date.today()
     clamped_end = min(end_window, today)
 
@@ -376,7 +400,6 @@ def _walk(node: Any) -> Iterable[Dict[str, Any]]:
 
 
 def _normalize_yield(val: float) -> float:
-    # Heuristic: if value looks like percent (> 1.0), convert to decimal
     return val / 100.0 if abs(val) > 1.0 else val
 
 
@@ -398,7 +421,6 @@ def fetch_data912_snapshot(ticker: str) -> Dict[str, Any]:
             continue
         for obj in _walk(data):
             try:
-                # Identify symbol fields
                 sym = None
                 for k in ("symbol", "ticker", "code", "name", "bond"):
                     if k in obj:
@@ -407,25 +429,21 @@ def fetch_data912_snapshot(ticker: str) -> Dict[str, Any]:
                             break
                 if sym is None:
                     continue
-                # Price candidates
                 for k in ("last", "price", "close", "p", "c", "px"):
                     if k in obj and isinstance(obj[k], (int, float)):
                         snapshot.setdefault("price_per_100", float(obj[k]))
                         snapshot.setdefault("price_source", f"{name}.{k}")
                         break
-                # Yield candidates
                 for k in ("ytm", "yield", "tirea", "tir", "ear"):
                     if k in obj and isinstance(obj[k], (int, float)):
                         snapshot.setdefault("tirea_decimal", _normalize_yield(float(obj[k])))
                         snapshot.setdefault("tirea_source", f"{name}.{k}")
                         break
-                # Face / par value candidates
                 for k in ("face", "par", "vn"):
                     if k in obj and isinstance(obj[k], (int, float)):
                         snapshot.setdefault("face_value", float(obj[k]))
                         snapshot.setdefault("face_source", f"{name}.{k}")
                         break
-                # Maturity candidates
                 for k in ("maturity", "maturityDate", "due", "vencimiento", "vto"):
                     if k in obj:
                         md = _parse_date_any(str(obj[k]))
@@ -478,7 +496,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     args = parser.parse_args(argv)
 
-    # Autofetch snapshot
     snap = fetch_data912_snapshot(args.ticker)
     price = args.price if args.price is not None else snap.get("price_per_100")
     tirea = args.tirea if args.tirea is not None else snap.get("tirea_decimal")
@@ -492,23 +509,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         maturity = snap.get("maturity_date")
         maturity_source = snap.get("maturity_source", "unavailable")
         if maturity is None:
-            # Fallback: if ticker is a known dual, use canonical maturity
             dual_meta = DUAL_BONDS_MAP.get(args.ticker.upper())
             if dual_meta and isinstance(dual_meta.get("maturity"), dt.date):
                 maturity = dual_meta["maturity"]
                 maturity_source = "known_dual_map"
-            # Fallback TIREA if missing and dual known
             if tirea is None and dual_meta and isinstance(dual_meta.get("tirea_decimal"), float):
                 tirea = float(dual_meta["tirea_decimal"])
 
     settlement = parse_date(args.settlement) if args.settlement else dt.date.today()
 
-    # Market TEM
     market = {}
     try:
         if maturity is not None:
             tamar_latest_dec: Optional[float] = None
-            # If user provided a TAMAR id (or we resolve one), fetch latest to use as live proxy if needed
             try:
                 if args.tamar_id is not None:
                     tamar_latest_dec = fetch_tamar_latest_decimal(args.tamar_id)
@@ -527,22 +540,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             if args.tirea is None and "tirea_decimal" in snap:
                 market.setdefault("tirea_source", snap.get("tirea_source"))
 
-            # Respect --market-source preference
             if args.market_source == "ytm":
                 market["tem_market"] = market.get("tem_from_tirea")
             elif args.market_source == "price":
                 market["tem_market"] = market.get("tem_from_price_bullet")
             elif args.market_source == "tamar":
-                market["tem_market"] = (
-                    market.get("tem_from_tamar_latest")
-                    if "tem_from_tamar_latest" in market and market.get("tem_from_tamar_latest") is not None
-                    else (tamar_to_tem_monthly(tamar_latest_dec) if tamar_latest_dec is not None else None)
-                )
+                if tamar_latest_dec is not None:
+                    market["tem_market"] = tamar_to_market_tem(tamar_latest_dec, settlement, maturity)
+                else:
+                    market["tem_market"] = market.get("tem_from_tamar_latest")
             else:
-                # auto already chosen inside compute_market_tem
                 pass
 
-            # Recompute percentage fields to match the selected source
             tm = market.get("tem_market")
             if tm is not None:
                 percent = round(tm * 100.0, 2)
@@ -556,7 +565,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as exc:
         market = {"error": f"Error calculando TEM de mercado: {exc}"}
 
-    # Prospectus TEM for known duals
     prospecto: Optional[Dict[str, Any]] = None
     try:
         dual_params = resolve_dual_params_from_ticker(args.ticker)
